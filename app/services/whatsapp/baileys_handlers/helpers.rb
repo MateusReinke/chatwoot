@@ -11,8 +11,16 @@ module Whatsapp::BaileysHandlers::Helpers # rubocop:disable Metrics/ModuleLength
     @raw_message[:key][:id]
   end
 
+  def remote_jid
+    @raw_message.dig(:key, :remoteJid)
+  end
+
   def incoming?
     !@raw_message[:key][:fromMe]
+  end
+
+  def group_message?
+    jid_type == 'group'
   end
 
   def jid_type # rubocop:disable Metrics/CyclomaticComplexity
@@ -152,11 +160,29 @@ module Whatsapp::BaileysHandlers::Helpers # rubocop:disable Metrics/ModuleLength
   end
 
   def contact_name
+    return group_name if group_message?
+
     # NOTE: `verifiedBizName` is only available for business accounts and has a higher priority than `pushName`.
     name = @raw_message[:verifiedBizName].presence || @raw_message[:pushName]
     return name if name.presence && (self_message? || incoming?)
 
     extract_from_jid(type: 'pn') || extract_from_jid(type: 'lid')
+  end
+
+  def group_name
+    @raw_message[:groupName].presence || @raw_message[:groupSubject].presence || remote_jid
+  end
+
+  def participant_jid
+    @raw_message.dig(:key, :participant) || @raw_message[:participant]
+  end
+
+  def participant_phone
+    participant_jid&.split('@')&.first&.split(':')&.first
+  end
+
+  def participant_name
+    @raw_message[:pushName].presence || participant_phone
   end
 
   def self_message?
@@ -185,7 +211,7 @@ module Whatsapp::BaileysHandlers::Helpers # rubocop:disable Metrics/ModuleLength
 
   def try_update_contact_avatar
     # TODO: Current logic will never update the contact avatar if their profile picture changes on WhatsApp.
-    return if @contact.avatar.attached?
+    return if @contact.avatar.attached? || group_message?
 
     phone = extract_from_jid(type: 'pn')
     profile_pic_url = fetch_profile_picture_url(phone) if phone

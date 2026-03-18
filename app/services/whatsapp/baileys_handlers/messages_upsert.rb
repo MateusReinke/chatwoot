@@ -23,18 +23,23 @@ module Whatsapp::BaileysHandlers::MessagesUpsert # rubocop:disable Metrics/Modul
   def handle_message # rubocop:disable Metrics/CyclomaticComplexity,Metrics/PerceivedComplexity,Metrics/MethodLength
     @lock_acquired = false
 
-    return unless %w[lid user].include?(jid_type)
-    return unless extract_from_jid(type: 'lid')
+    return unless %w[group lid user].include?(jid_type)
+    return unless remote_jid.present? if group_message?
+    return unless extract_from_jid(type: 'lid') if %w[lid user].include?(jid_type)
     return if ignore_message?
     return if find_message_by_source_id(raw_message_id)
 
     @lock_acquired = acquire_message_processing_lock
     return unless @lock_acquired
 
-    # Lock by contact phone to prevent race conditions when multiple messages
-    # from the same contact arrive simultaneously (e.g., WhatsApp albums).
-    contact_phone = extract_from_jid(type: 'pn') || extract_from_jid(type: 'lid')
-    with_contact_lock(contact_phone) do
+    # Lock by contact identifier to prevent race conditions when multiple messages
+    # from the same contact/group arrive simultaneously (e.g., WhatsApp albums).
+    contact_key = if group_message?
+                    remote_jid
+                  else
+                    extract_from_jid(type: 'pn') || extract_from_jid(type: 'lid')
+                  end
+    with_contact_lock(contact_key) do
       # Re-check after acquiring lock to handle race conditions where:
       # 1. An agent sends a message from Chatwoot (slow API call)
       # 2. WhatsApp sends webhook before source_id is saved
@@ -57,6 +62,8 @@ module Whatsapp::BaileysHandlers::MessagesUpsert # rubocop:disable Metrics/Modul
   end
 
   def set_contact
+    return set_group_contact if group_message?
+
     phone = extract_from_jid(type: 'pn')
     source_id = extract_from_jid(type: 'lid')
     identifier = "#{source_id}@lid"
@@ -78,6 +85,19 @@ module Whatsapp::BaileysHandlers::MessagesUpsert # rubocop:disable Metrics/Modul
     @contact = contact_inbox.contact
 
     update_contact_info(phone, source_id, identifier)
+  end
+
+  def set_group_contact
+    contact_inbox = ::ContactInboxWithContactBuilder.new(
+      source_id: remote_jid,
+      inbox: inbox,
+      contact_attributes: { name: contact_name, identifier: remote_jid }
+    ).perform
+
+    @contact_inbox = contact_inbox
+    @contact = contact_inbox.contact
+
+    @contact.update!(name: contact_name, identifier: remote_jid)
   end
 
   def update_contact_info(phone, source_id, identifier)
@@ -116,6 +136,9 @@ module Whatsapp::BaileysHandlers::MessagesUpsert # rubocop:disable Metrics/Modul
     type = message_type
     msg = unwrap_ephemeral_message(@raw_message[:message])
     content_attributes = { external_created_at: baileys_extract_message_timestamp(@raw_message[:messageTimestamp]) }
+    content_attributes[:is_group] = true if group_message?
+    content_attributes[:group_jid] = remote_jid if group_message?
+    content_attributes[:external_sender_name] = participant_name if group_message? && incoming? && participant_name.present?
     content_attributes[:external_sender_name] = 'WhatsApp' unless incoming?
     if type == 'reaction'
       content_attributes[:in_reply_to_external_id] = msg.dig(:reactionMessage, :key, :id)
