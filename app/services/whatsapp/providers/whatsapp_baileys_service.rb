@@ -391,7 +391,7 @@ class Whatsapp::Providers::WhatsappBaileysService < Whatsapp::Providers::BaseSer
   end
 
   def remote_jid
-    return @recipient_id if @recipient_id.ends_with?('@lid')
+    return @recipient_id if @recipient_id.include?('@')
 
     "#{@recipient_id.delete('+')}@s.whatsapp.net"
   end
